@@ -139,4 +139,5 @@ def handler(job):
         return {"error": f"Generation failed: {e}"}
 
 
-runpod.serverless.start({"handler": handler})
+if __name__ == "__main__":
+    runpod.serverless.start({"handler": handler})
