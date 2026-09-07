@@ -31,12 +31,18 @@ Speech + lip-sync (human characters only): Indic Parler-TTS
 languages plus English - the language is auto-detected from the text you
 give it, no separate language code needed. LatentSync (ByteDance, Apache-2.0)
 then resyncs the mouth region of the Wan2.2-generated video to that speech
-audio. LatentSync runs in its OWN isolated Python venv
-(/opt/latentsync-venv, set up in the Dockerfile) invoked as a subprocess -
-it's a standalone research repo with its own pinned dependency versions that
-would very likely conflict with the carefully-pinned Wan2.2/diffusers stack
-in THIS venv if installed together (see git history for how fragile that
-pinning was to get right the first time).
+audio.
+
+Both run in their OWN isolated Python venvs (/opt/latentsync-venv and
+/opt/tts-venv, set up in the Dockerfile), invoked as subprocesses rather than
+imported in-process (see tts_worker.py for the TTS side). Two unrelated,
+independently-discovered hard conflicts with the main Wan2.2/diffusers venv
+made this necessary: LatentSync is a standalone research repo with its own
+pinned torch/diffusers/xformers versions, and parler-tts pins
+transformers==4.46.1 exactly while diffusers' AutoencoderRAE (unrelated to
+anything we use, just eagerly imported) needs transformers>=4.50. Isolating
+both avoids re-litigating either fight (see git history for how fragile
+getting the main venv's pins right was in the first place).
 
 IMPORTANT LIMITATION: no open-source lip-sync model (this one included) is
 trained for animal faces - only human ones. Pointing this at a monkey/dog/etc.
@@ -69,17 +75,20 @@ from huggingface_hub import snapshot_download
 MODEL_ID_T2V = os.environ.get("WAN_MODEL_T2V", "Wan-AI/Wan2.2-TI2V-5B-Diffusers")
 MODEL_ID_I2V = os.environ.get("WAN_MODEL_I2V", "Wan-AI/Wan2.2-TI2V-5B-Diffusers")
 MODEL_ID_AUDIO = os.environ.get("WAN_MODEL_AUDIO", "stabilityai/stable-audio-open-1.0")
-MODEL_ID_TTS = os.environ.get("WAN_MODEL_TTS", "ai4bharat/indic-parler-tts")
 MODEL_ID_LATENTSYNC = os.environ.get("WAN_MODEL_LATENTSYNC", "ByteDance/LatentSync-1.6")
 LATENTSYNC_DIR = "/opt/LatentSync"
 LATENTSYNC_VENV_PYTHON = "/opt/latentsync-venv/bin/python"
+TTS_VENV_PYTHON = "/opt/tts-venv/bin/python"
+TTS_WORKER_SCRIPT = str(Path(__file__).resolve().parent / "tts_worker.py")
 DTYPE = torch.bfloat16
 
 # Cached per-worker-process - a warm worker (RunPod keeps one alive briefly
 # between jobs) reuses this, so only a cold start pays the weight-load cost.
+# TTS is NOT cached here - it runs as a fresh subprocess per call in its own
+# isolated venv (see _generate_speech), so it re-pays the model-load cost
+# every time. A real inefficiency, acceptable for now (see tts_worker.py).
 _pipelines = {}
 _audio_pipeline = None
-_tts = None  # (model, tokenizer, description_tokenizer)
 _latentsync_checkpoints_ready = False
 
 
@@ -160,40 +169,23 @@ def _mux_audio_video(video_path: str, audio_path: str, output_path: str) -> None
     ])
 
 
-def _get_tts():
-    global _tts
-    if _tts is None:
-        from parler_tts import ParlerTTSForConditionalGeneration
-        from transformers import AutoTokenizer
-
-        model = ParlerTTSForConditionalGeneration.from_pretrained(MODEL_ID_TTS, torch_dtype=DTYPE).to("cuda")
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_ID_TTS)
-        description_tokenizer = AutoTokenizer.from_pretrained(model.config.text_encoder._name_or_path)
-        _tts = (model, tokenizer, description_tokenizer)
-    return _tts
-
-
 def _generate_speech(text: str, voice_description: str, tmp_dir: str) -> str:
     """
-    Text-to-speech via Indic Parler-TTS. Language is auto-detected from
-    `text` itself (supports 19+ Indian languages plus English) - no language
-    code needed. `voice_description` selects among the model's 69 named
-    voices and their delivery style, e.g. "Rohit speaks slowly and clearly
-    with a warm tone, close recording, no background noise."
+    Text-to-speech via Indic Parler-TTS, run in its own isolated venv (see
+    tts_worker.py for why - a hard transformers version conflict with the
+    main Wan2.2/diffusers venv). Language is auto-detected from `text`
+    itself (supports 19+ Indian languages plus English) - no language code
+    needed. `voice_description` selects among the model's 69 named voices
+    and their delivery style, e.g. "Rohit speaks slowly and clearly with a
+    warm tone, close recording, no background noise."
     """
-    model, tokenizer, description_tokenizer = _get_tts()
-    description_ids = description_tokenizer(voice_description, return_tensors="pt").to("cuda")
-    prompt_ids = tokenizer(text, return_tensors="pt").to("cuda")
-
-    generation = model.generate(
-        input_ids=description_ids.input_ids,
-        attention_mask=description_ids.attention_mask,
-        prompt_input_ids=prompt_ids.input_ids,
-        prompt_attention_mask=prompt_ids.attention_mask,
-    )
-    audio_arr = generation.cpu().float().numpy().squeeze()
     speech_path = str(Path(tmp_dir) / "speech.wav")
-    sf.write(speech_path, audio_arr, model.config.sampling_rate)
+    _run_subprocess([
+        TTS_VENV_PYTHON, TTS_WORKER_SCRIPT,
+        "--text", text,
+        "--voice-description", voice_description,
+        "--output", speech_path,
+    ])
     return speech_path
 
 

@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ffmpeg \
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-COPY handler.py /app/handler.py
+COPY handler.py tts_worker.py /app/
 
 # LatentSync (human lip-sync, Apache-2.0) lives in its OWN isolated venv,
 # not the main one above. It's a standalone research repo with its own
@@ -24,6 +24,16 @@ COPY handler.py /app/handler.py
 RUN python -m venv /opt/latentsync-venv \
     && git clone --depth 1 https://github.com/bytedance/LatentSync.git /opt/LatentSync \
     && /opt/latentsync-venv/bin/pip install --no-cache-dir -r /opt/LatentSync/requirements.txt
+
+# Indic Parler-TTS (speech, Apache-2.0) ALSO needs its own isolated venv:
+# it pins transformers==4.46.1 exactly, which hard-conflicts with the
+# transformers>=4.50 the main venv needs (diffusers' AutoencoderRAE eagerly
+# imports Dinov2WithRegistersConfig, added in transformers 4.50 - see git
+# history). tts_worker.py runs here as a subprocess, same pattern as
+# LatentSync above.
+RUN python -m venv /opt/tts-venv \
+    && /opt/tts-venv/bin/pip install --no-cache-dir \
+        "git+https://github.com/huggingface/parler-tts.git" soundfile
 
 # Weights are NOT baked into the image (that made the image ~90GB and the
 # local build unreliable). handler.py's from_pretrained() calls download
