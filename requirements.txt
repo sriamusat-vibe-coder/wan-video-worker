@@ -8,3 +8,4 @@ imageio-ffmpeg
 runpod
 huggingface_hub
 hf_transfer
+soundfile
