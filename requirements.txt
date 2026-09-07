@@ -1,0 +1,8 @@
+diffusers>=0.31.0
+transformers
+accelerate
+safetensors
+imageio
+imageio-ffmpeg
+runpod
+huggingface_hub
