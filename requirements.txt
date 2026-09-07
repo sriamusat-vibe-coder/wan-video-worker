@@ -9,3 +9,4 @@ runpod
 huggingface_hub
 hf_transfer
 soundfile
+git+https://github.com/huggingface/parler-tts.git
